@@ -1,0 +1,5 @@
+# compiled binary - don't commit, build it locally with `make`
+src/watchdog
+*.o
+*.tmp
+__pycache__/

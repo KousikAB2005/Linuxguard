@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LinuxGuard - Process Watchdog Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .top-stats {
+    display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
+  }
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; min-width: 140px;
+  }
+  .stat-card .label { color: var(--muted); font-size: 12px; }
+  .stat-card .value { font-size: 24px; font-weight: 600; margin-top: 4px; }
+  .layout { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  tr.warn { background: rgba(210, 153, 34, 0.08); }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+  }
+  .badge.ok { background: rgba(63,185,80,0.15); color: var(--ok); }
+  .badge.warning { background: rgba(210,153,34,0.15); color: var(--warn); }
+  .verdict { color: var(--warn); font-size: 12px; }
+  #alertList { list-style: none; padding: 0; margin: 0; }
+  #alertList li {
+    padding: 10px; border-radius: 6px; background: rgba(248,81,73,0.08);
+    border-left: 3px solid var(--danger); margin-bottom: 8px; font-size: 13px;
+  }
+  #alertList li .pname { font-weight: 600; }
+  .empty { color: var(--muted); font-size: 13px; padding: 10px 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot.live { background: var(--ok); animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+</style>
+</head>
+<body>
+
+<h1>LinuxGuard</h1>
+<div class="sub"><span class="dot live"></span>Embedded Linux Process Watchdog &mdash; <span id="lastUpdate">connecting...</span></div>
+
+<div class="top-stats">
+  <div class="stat-card"><div class="label">Processes Tracked</div><div class="value" id="statTotal">-</div></div>
+  <div class="stat-card"><div class="label">Flagged</div><div class="value" id="statFlagged" style="color:var(--warn)">-</div></div>
+  <div class="stat-card"><div class="label">Total CPU%</div><div class="value" id="statCpu">-</div></div>
+  <div class="stat-card"><div class="label">Total RSS</div><div class="value" id="statRss">-</div></div>
+</div>
+
+<div class="layout">
+  <div class="panel">
+    <h2>Top Processes by CPU</h2>
+    <table>
+      <thead><tr><th>PID</th><th>Name</th><th>CPU%</th><th>Baseline</th><th>RSS</th><th>Status</th></tr></thead>
+      <tbody id="procTable"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Root-Cause Alerts</h2>
+    <ul id="alertList"><li class="empty" style="border:none;background:none;">No anomalies detected yet.</li></ul>
+    <h2 style="margin-top:20px;">CPU Trend (Top Process)</h2>
+    <canvas id="cpuChart" height="140"></canvas>
+  </div>
+</div>
+
+<script>
+const REFRESH_MS = 2000;
+let history = [];
+let chart = null;
+
+function fmtKB(kb) {
+  if (kb > 1024*1024) return (kb/1024/1024).toFixed(2) + " GB";
+  if (kb > 1024) return (kb/1024).toFixed(1) + " MB";
+  return kb + " KB";
+}
+
+function initChart() {
+  const ctx = document.getElementById('cpuChart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+      label: 'CPU %', data: [], borderColor: '#58a6ff',
+      backgroundColor: 'rgba(88,166,255,0.1)', fill: true, tension: 0.3
+    }]},
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
+        y: { ticks: { color: '#8b949e' }, grid: { color: '#30363d' }, beginAtZero: true }
+      }
+    }
+  });
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/metrics.json?_=' + Date.now());
+    const data = await res.json();
+    render(data);
+    document.getElementById('lastUpdate').textContent =
+      'last updated ' + new Date(data.timestamp * 1000).toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('lastUpdate').textContent = 'waiting for watchdog daemon...';
+  }
+}
+
+function render(data) {
+  const procs = data.processes.sort((a,b) => b.cpu_pct - a.cpu_pct);
+  const flagged = procs.filter(p => p.verdict);
+  const totalCpu = procs.reduce((s,p) => s + p.cpu_pct, 0);
+  const totalRss = procs.reduce((s,p) => s + p.rss_kb, 0);
+
+  document.getElementById('statTotal').textContent = procs.length;
+  document.getElementById('statFlagged').textContent = flagged.length;
+  document.getElementById('statCpu').textContent = totalCpu.toFixed(1) + '%';
+  document.getElementById('statRss').textContent = fmtKB(totalRss);
+
+  const tbody = document.getElementById('procTable');
+  tbody.innerHTML = procs.slice(0, 15).map(p => `
+    <tr class="${p.verdict ? 'warn' : ''}">
+      <td>${p.pid}</td>
+      <td>${p.name}</td>
+      <td>${p.cpu_pct.toFixed(1)}%</td>
+      <td>${p.cpu_baseline.toFixed(1)}%</td>
+      <td>${fmtKB(p.rss_kb)}</td>
+      <td><span class="badge ${p.status}">${p.status}</span></td>
+    </tr>`).join('');
+
+  const alertList = document.getElementById('alertList');
+  if (flagged.length === 0) {
+    alertList.innerHTML = '<li class="empty" style="border:none;background:none;">No anomalies detected.</li>';
+  } else {
+    alertList.innerHTML = flagged.map(p => `
+      <li><span class="pname">${p.name} (PID ${p.pid})</span><br>
+      <span class="verdict">${p.verdict}</span></li>`).join('');
+  }
+
+  if (procs.length > 0 && chart) {
+    const top = procs[0];
+    const label = new Date(data.timestamp * 1000).toLocaleTimeString();
+    chart.data.labels.push(label);
+    chart.data.datasets[0].data.push(top.cpu_pct);
+    chart.data.datasets[0].label = 'CPU % - ' + top.name;
+    if (chart.data.labels.length > 20) {
+      chart.data.labels.shift();
+      chart.data.datasets[0].data.shift();
+    }
+    chart.update('none');
+  }
+}
+
+initChart();
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
