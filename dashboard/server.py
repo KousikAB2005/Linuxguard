@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3//
 """
 LinuxGuard dashboard server.
 
@@ -143,7 +143,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass  # keep console quiet; comment out to debug
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" :
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
         print(f"LinuxGuard dashboard: http://localhost:{PORT}")
         print(f"Reading metrics from: {METRICS_PATH}")
